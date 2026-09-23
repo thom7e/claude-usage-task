@@ -1,5 +1,6 @@
 """
-Windows-Taskleisten-Icon fuer Claude-Code Session- (5h) und Weekly- (7d) Usage.
+Windows-Taskleisten-Icon fuer Claude-Code Session- (5h), Weekly- (7d)
+und lokale Codex-Nutzung.
 
 Liest den OAuth-Token aus ~/.claude/.credentials.json und schickt periodisch
 einen minimalen Request (max_tokens=1, Haiku) an die Anthropic-API, um die
@@ -8,26 +9,39 @@ Werte, die auch die offizielle Anzeige nutzt.
 
 Jeder Poll kostet ein winziges bisschen Quota (1 Output-Token). Bei POLL_SECONDS=300
 sind das ~288 Requests/Tag - vernachlaessigbar gegenueber echter Nutzung, aber nicht null.
+
+Codex wird lokal aus ~/.codex/state_5.sqlite gelesen. Das ist keine Account-Quota,
+sondern die lokal von Codex gespeicherte Token-Nutzung je Thread.
 """
 
 import io
 import json
 import os
+import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from PIL import Image, ImageDraw
 import pystray
 
 CRED_PATH = os.path.expanduser(r"~\.claude\.credentials.json")
+CODEX_STATE_DB = os.path.expanduser(r"~\.codex\state_5.sqlite")
+CODEX_DAILY_WARN_TOKENS = int(os.environ.get("CODEX_DAILY_WARN_TOKENS", "10000000"))
 POLL_SECONDS = 300
 MODEL = "claude-haiku-4-5-20251001"
 API_URL = "https://api.anthropic.com/v1/messages"
 
 _lock = threading.Lock()
-_state = {"error": "startet...", "five_h": None, "seven_d": None}
+_state = {
+    "error": "startet...",
+    "claude_error": None,
+    "codex_error": None,
+    "five_h": None,
+    "seven_d": None,
+    "codex": None,
+}
 
 
 def load_token():
@@ -68,6 +82,59 @@ def fetch_usage():
     }
 
 
+def start_of_today_ts():
+    now = datetime.now()
+    return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+
+def fetch_codex_usage():
+    if not os.path.exists(CODEX_STATE_DB):
+        return {"available": False, "error": f"nicht gefunden: {CODEX_STATE_DB}"}
+
+    today_ts = start_of_today_ts()
+    seven_days_ts = int((datetime.now() - timedelta(days=7)).timestamp())
+    db_uri = f"file:{CODEX_STATE_DB}?mode=ro"
+
+    with sqlite3.connect(db_uri, uri=True, timeout=2) as con:
+        con.row_factory = sqlite3.Row
+        summary = con.execute(
+            """
+            select
+                coalesce(sum(tokens_used), 0) as total_tokens,
+                coalesce(sum(case when updated_at >= ? then tokens_used else 0 end), 0) as today_tokens,
+                coalesce(sum(case when updated_at >= ? then tokens_used else 0 end), 0) as seven_d_tokens,
+                count(*) as thread_count,
+                coalesce(sum(case when updated_at >= ? then 1 else 0 end), 0) as today_threads,
+                coalesce(sum(case when updated_at >= ? then 1 else 0 end), 0) as seven_d_threads
+            from threads
+            where model_provider = 'openai'
+            """,
+            (today_ts, seven_days_ts, today_ts, seven_days_ts),
+        ).fetchone()
+        latest = con.execute(
+            """
+            select title, updated_at, tokens_used
+            from threads
+            where model_provider = 'openai'
+            order by updated_at desc
+            limit 1
+            """
+        ).fetchone()
+
+    return {
+        "available": True,
+        "total_tokens": int(summary["total_tokens"]),
+        "today_tokens": int(summary["today_tokens"]),
+        "seven_d_tokens": int(summary["seven_d_tokens"]),
+        "thread_count": int(summary["thread_count"]),
+        "today_threads": int(summary["today_threads"]),
+        "seven_d_threads": int(summary["seven_d_threads"]),
+        "latest_title": latest["title"] if latest else None,
+        "latest_updated": int(latest["updated_at"]) if latest else None,
+        "latest_tokens": int(latest["tokens_used"]) if latest else 0,
+    }
+
+
 def fmt_delta(ts):
     if ts is None:
         return "?"
@@ -83,6 +150,22 @@ def fmt_delta(ts):
     return f"{h}h {m}m"
 
 
+def fmt_datetime(ts):
+    if ts is None:
+        return "?"
+    return datetime.fromtimestamp(ts).strftime("%d.%m. %H:%M")
+
+
+def fmt_tokens(tokens):
+    if tokens is None:
+        return "?"
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:.1f}M"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:.0f}k"
+    return str(tokens)
+
+
 def color_for(util):
     if util is None:
         return (128, 128, 128)
@@ -93,14 +176,20 @@ def color_for(util):
     return (210, 50, 50)
 
 
-def make_icon(five_h, seven_d):
+def codex_util(codex):
+    if not codex or not codex.get("available") or CODEX_DAILY_WARN_TOKENS <= 0:
+        return None
+    return min(codex["today_tokens"] / CODEX_DAILY_WARN_TOKENS, 1.0)
+
+
+def make_icon(five_h, seven_d, codex=None):
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    bar_w = 22
-    gap = 8
-    margin_x = (size - (2 * bar_w + gap)) // 2
+    bar_w = 14
+    gap = 6
+    margin_x = (size - (3 * bar_w + 2 * gap)) // 2
     top = 4
     bottom = size - 4
     full_h = bottom - top
@@ -113,6 +202,8 @@ def make_icon(five_h, seven_d):
 
     draw_bar(margin_x, five_h, color_for(five_h))
     draw_bar(margin_x + bar_w + gap, seven_d, color_for(seven_d))
+    codex_activity = codex_util(codex)
+    draw_bar(margin_x + 2 * (bar_w + gap), codex_activity, color_for(codex_activity))
 
     return img
 
@@ -121,41 +212,76 @@ def tooltip_text():
     with _lock:
         s = dict(_state)
     if s.get("error"):
-        return f"Claude Usage - Fehler: {s['error']}"
+        return f"Claude + Codex Usage - Fehler: {s['error']}"
     fh = s["five_h"]
     sd = s["seven_d"]
-    parts = ["Claude Code Usage"]
+    codex = s.get("codex")
+    parts = ["Claude + Codex Usage"]
+    if s.get("claude_error"):
+        parts.append(f"Claude: Fehler: {s['claude_error']}")
     if fh:
         parts.append(
-            f"5h-Session: {fh['five_h_util']*100:.0f}%  (reset in {fmt_delta(fh['five_h_reset'])})"
+            f"Claude 5h: {fh['five_h_util']*100:.0f}%  (reset in {fmt_delta(fh['five_h_reset'])})"
         )
     if sd:
         parts.append(
-            f"Weekly (7d): {sd['seven_d_util']*100:.0f}%  (reset in {fmt_delta(sd['seven_d_reset'])})"
+            f"Claude 7d: {sd['seven_d_util']*100:.0f}%  (reset in {fmt_delta(sd['seven_d_reset'])})"
         )
+    if s.get("codex_error"):
+        parts.append(f"Codex: Fehler: {s['codex_error']}")
+    elif codex and codex.get("available"):
+        parts.append(
+            f"Codex heute: {fmt_tokens(codex['today_tokens'])} Tokens in {codex['today_threads']} Threads"
+        )
+        parts.append(
+            f"Codex 7d: {fmt_tokens(codex['seven_d_tokens'])} Tokens in {codex['seven_d_threads']} Threads"
+        )
+        parts.append(f"Codex gesamt lokal: {fmt_tokens(codex['total_tokens'])} Tokens")
+        if codex.get("latest_title"):
+            title = codex["latest_title"]
+            if len(title) > 50:
+                title = title[:47] + "..."
+            parts.append(
+                f"Letzter Codex-Thread: {fmt_tokens(codex['latest_tokens'])} Tokens, {fmt_datetime(codex['latest_updated'])}"
+            )
+            parts.append(title)
     return "\n".join(parts)
+
+
+def tray_title_text():
+    with _lock:
+        s = dict(_state)
+    if s.get("error"):
+        return "Claude + Codex Usage - Fehler"
+
+    parts = []
+    fh = s.get("five_h")
+    sd = s.get("seven_d")
+    codex = s.get("codex")
+
+    if fh and fh.get("five_h_util") is not None:
+        parts.append(f"C 5h {fh['five_h_util']*100:.0f}% reset {fmt_delta(fh['five_h_reset'])}")
+    if sd and sd.get("seven_d_util") is not None:
+        parts.append(f"7d {sd['seven_d_util']*100:.0f}%")
+    if codex and codex.get("available"):
+        parts.append(f"Codex {fmt_tokens(codex['today_tokens'])} heute")
+
+    if not parts:
+        if s.get("claude_error") and s.get("codex_error"):
+            return "Claude + Codex Usage - Fehler"
+        if s.get("claude_error"):
+            return "Claude Fehler | Codex bereit"
+        if s.get("codex_error"):
+            return "Claude bereit | Codex Fehler"
+        return "Claude + Codex Usage"
+
+    return " | ".join(parts)[:120]
 
 
 def poll_loop(icon):
     while True:
-        try:
-            data = fetch_usage()
-            with _lock:
-                _state["error"] = None
-                _state["five_h"] = {
-                    "five_h_util": data["five_h_util"],
-                    "five_h_reset": data["five_h_reset"],
-                }
-                _state["seven_d"] = {
-                    "seven_d_util": data["seven_d_util"],
-                    "seven_d_reset": data["seven_d_reset"],
-                }
-            icon.icon = make_icon(data["five_h_util"], data["seven_d_util"])
-        except Exception as e:
-            with _lock:
-                _state["error"] = str(e)[:120]
-            icon.icon = make_icon(None, None)
-        icon.title = tooltip_text()
+        _refresh_state(icon)
+        icon.title = tray_title_text()
         time.sleep(POLL_SECONDS)
 
 
@@ -164,23 +290,50 @@ def force_refresh(icon, item):
 
 
 def _one_shot(icon):
+    _refresh_state(icon)
+    icon.title = tray_title_text()
+
+
+def _refresh_state(icon):
+    claude_error = None
+    codex_error = None
+    five_h = None
+    seven_d = None
+    codex = None
+
     try:
         data = fetch_usage()
-        with _lock:
-            _state["error"] = None
-            _state["five_h"] = {
-                "five_h_util": data["five_h_util"],
-                "five_h_reset": data["five_h_reset"],
-            }
-            _state["seven_d"] = {
-                "seven_d_util": data["seven_d_util"],
-                "seven_d_reset": data["seven_d_reset"],
-            }
-        icon.icon = make_icon(data["five_h_util"], data["seven_d_util"])
+        five_h = {
+            "five_h_util": data["five_h_util"],
+            "five_h_reset": data["five_h_reset"],
+        }
+        seven_d = {
+            "seven_d_util": data["seven_d_util"],
+            "seven_d_reset": data["seven_d_reset"],
+        }
     except Exception as e:
-        with _lock:
-            _state["error"] = str(e)[:120]
-    icon.title = tooltip_text()
+        claude_error = str(e)[:120]
+
+    try:
+        codex = fetch_codex_usage()
+        if not codex.get("available"):
+            codex_error = codex.get("error", "nicht verfuegbar")[:120]
+    except Exception as e:
+        codex_error = str(e)[:120]
+
+    with _lock:
+        _state["error"] = claude_error and codex_error
+        _state["claude_error"] = claude_error
+        _state["codex_error"] = codex_error
+        _state["five_h"] = five_h
+        _state["seven_d"] = seven_d
+        _state["codex"] = codex
+
+    icon.icon = make_icon(
+        five_h["five_h_util"] if five_h else None,
+        seven_d["seven_d_util"] if seven_d else None,
+        codex,
+    )
 
 
 def quit_app(icon, item):
@@ -189,14 +342,16 @@ def quit_app(icon, item):
 
 def main():
     icon = pystray.Icon(
-        "claude-usage",
-        icon=make_icon(None, None),
-        title="Claude Usage - startet...",
+        "claude-codex-usage",
+        icon=make_icon(None, None, None),
+        title="Claude + Codex Usage - startet...",
         menu=pystray.Menu(
             pystray.MenuItem("Jetzt aktualisieren", force_refresh),
             pystray.MenuItem("Beenden", quit_app),
         ),
     )
+    _refresh_state(icon)
+    icon.title = tray_title_text()
     threading.Thread(target=poll_loop, args=(icon,), daemon=True).start()
     icon.run()
 

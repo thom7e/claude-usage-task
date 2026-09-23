@@ -1,6 +1,9 @@
 # claude-usage-tray
 
-Windows-Taskleisten-Icon fuer die live Claude-Code Nutzung: 5h-Session-Limit und 7-Tage-(Weekly)-Limit.
+Windows-Taskleisten-Icon fuer die live Claude-Code Nutzung und lokale Codex-Nutzung.
+
+- Claude: 5h-Session-Limit und 7-Tage-(Weekly)-Limit aus den Anthropic-RateLimit-Headern.
+- Codex: lokal gespeicherte Token-Nutzung aus `~/.codex/state_5.sqlite`.
 
 ## Funktionsweise
 
@@ -8,11 +11,15 @@ Liest den OAuth-Access-Token aus `~/.claude/.credentials.json` (wird von Claude 
 
 Jeder Poll kostet minimal Quota (1 Output-Token). Standardintervall: alle 5 Minuten.
 
+Codex wird ohne Netzwerk-Request aus der lokalen Codex-Datenbank gelesen. Angezeigt werden die lokal gespeicherten Token fuer heute, 7 Tage und insgesamt. Das ist keine offizielle Account-Quota, sondern eine lokale Nutzungsuebersicht der auf diesem Rechner vorhandenen Codex-Threads.
+
+Wichtig: Codex-Restquote/Reset-Zeit wird derzeit nicht angezeigt, weil diese Werte nicht stabil in den lokalen Codex-Dateien verfuegbar sind. Die Codex-Anzeige ist deshalb ein lokaler Nutzungszaehler, keine Limit-Anzeige.
+
 ## Anzeige
 
-Icon: zwei vertikale Balken (links 5h-Session, rechts 7d-Weekly), Fuellstand = Auslastung, Farbe gruen/gelb/rot je nach Schwelle (<70% / <90% / >=90%).
+Icon: drei vertikale Balken (Claude 5h, Claude 7d, Codex heute). Claude zeigt echte Limit-Auslastung; Codex normalisiert die heutigen lokalen Tokens gegen `CODEX_DAILY_WARN_TOKENS` (Standard: 10 Mio.).
 
-Tooltip beim Hover: exakte Prozentwerte + Reset-Zeit ("in Xh Ym" bzw. "in Xd Xh").
+Tray-Tooltip: kurze stabile Windows-Anzeige mit Claude-Prozentwerten, Reset-Zeit und Codex-Tokens heute.
 
 Rechtsklick-Menü: "Jetzt aktualisieren", "Beenden".
 
