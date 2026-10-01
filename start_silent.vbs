@@ -1,2 +1,7 @@
 Set shell = CreateObject("WScript.Shell")
-shell.Run """C:\Program Files\Python313\pythonw.exe"" ""C:\Users\thoma\Documents\github_aktuell\claude-usage-tray\usage_tray.py""", 0, False
+Set fso = CreateObject("Scripting.FileSystemObject")
+q = Chr(34)
+folder = fso.GetParentFolderName(WScript.ScriptFullName)
+py = q & "C:\Program Files\Python313\pythonw.exe" & q
+script = q & folder & "\usage_tray.py" & q
+shell.Run py & " " & script, 0, False

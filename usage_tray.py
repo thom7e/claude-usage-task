@@ -1,23 +1,21 @@
-"""
-Windows-Taskleisten-Icon fuer Claude, Codex und Grok.
-
-Claude: OAuth-Token aus ~/.claude/.credentials.json, ein minimaler Request
-(max_tokens=1, Haiku) und die anthropic-ratelimit-unified-* Header.
-Codex: letzter rate_limits-Schnappschuss in der neuesten Session-Datei
-unter ~/.codex/sessions (5h = primary, 7d = secondary).
-Grok: Wochenquote von demselben Billing-Endpunkt wie /usage.
-Eine 5h-Session gibt es bei Grok nicht.
-"""
-
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime
 
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 import requests
 from PIL import Image, ImageDraw
 import pystray
+from pystray._util import win32 as traywin
+
+WM_APPLY = traywin.WM_USER + 12
 
 CRED_PATH = os.path.expanduser(r"~\.claude\.credentials.json")
 CODEX_SESSIONS = os.path.expanduser(r"~\.codex\sessions")
@@ -301,109 +299,107 @@ def _pct(util):
     return f"{util * 100:.0f}%"
 
 
-def _line(name, util, reset):
+def _tip_line(name, util, reset):
     if util is None:
-        return f"{name}: —"
-    return f"{name}: {_pct(util)}   reset {fmt_delta(reset)}"
+        return None
+    return f"{name} {_pct(util)} · {fmt_delta(reset)}"
 
 
 def tooltip_text():
     with _lock:
         s = dict(_state)
     if s.get("error") == "startet...":
-        return "Usage - startet..."
-    parts = []
-    fh = s.get("five_h") or {}
-    sd = s.get("seven_d") or {}
-    codex = s.get("codex") or {}
-    grok = s.get("grok") or {}
-    if s.get("claude_error"):
-        parts.append("C Fehler")
-    else:
-        bits = []
-        if fh.get("five_h_util") is not None:
-            bits.append(f"5h {_pct(fh['five_h_util'])}")
-        if sd.get("seven_d_util") is not None:
-            bits.append(f"7d {_pct(sd['seven_d_util'])}")
-        if bits:
-            parts.append("C " + " ".join(bits))
-    if s.get("codex_error"):
-        parts.append("X Fehler")
-    else:
-        bits = []
-        if codex.get("five_h_util") is not None:
-            bits.append(f"5h {_pct(codex['five_h_util'])}")
-        if codex.get("seven_d_util") is not None:
-            bits.append(f"7d {_pct(codex['seven_d_util'])}")
-        if bits:
-            parts.append("X " + " ".join(bits))
-    if s.get("grok_error"):
-        parts.append("G Fehler")
-    elif grok.get("seven_d_util") is not None:
-        parts.append(f"G 7d {_pct(grok['seven_d_util'])}")
-    return " | ".join(parts)[:120] or "Usage"
-
-
-def _product_line(products):
-    labels = {"GrokBuild": "Build", "GrokVoice": "Voice"}
-    parts = []
-    for row in products or []:
-        if row.get("util") is None:
-            continue
-        parts.append(f"{labels.get(row['name'], row['name'])} {_pct(row['util'])}")
-    if not parts:
-        return None
-    return "Grok Anteile: " + ", ".join(parts)
-
-
-def menu():
-    with _lock:
-        s = dict(_state)
+        return "Claude + Codex Usage - startet..."
     fh = s.get("five_h") or {}
     sd = s.get("seven_d") or {}
     codex = s.get("codex") or {}
     grok = s.get("grok") or {}
     lines = []
     if s.get("claude_error"):
-        lines.append("Claude: " + s["claude_error"][:80])
+        lines.append("Claude Fehler")
     else:
-        lines.append(_line("Claude 5h", fh.get("five_h_util"), fh.get("five_h_reset")))
-        lines.append(_line("Claude 7d", sd.get("seven_d_util"), sd.get("seven_d_reset")))
+        lines.append(_tip_line("Claude 5h", fh.get("five_h_util"), fh.get("five_h_reset")))
+        lines.append(_tip_line("Claude 7d", sd.get("seven_d_util"), sd.get("seven_d_reset")))
     if s.get("codex_error"):
-        lines.append("Codex: " + s["codex_error"][:80])
+        lines.append("Codex Fehler")
     else:
-        lines.append(_line("Codex 5h", codex.get("five_h_util"), codex.get("five_h_reset")))
-        lines.append(_line("Codex 7d", codex.get("seven_d_util"), codex.get("seven_d_reset")))
-        if codex.get("sampled_at"):
-            lines.append("Codex-Stand: " + fmt_datetime(codex["sampled_at"]))
+        lines.append(_tip_line("Codex 5h", codex.get("five_h_util"), codex.get("five_h_reset")))
+        lines.append(_tip_line("Codex 7d", codex.get("seven_d_util"), codex.get("seven_d_reset")))
     if s.get("grok_error"):
-        lines.append("Grok: " + s["grok_error"][:80])
+        lines.append("Grok Fehler")
     else:
-        lines.append(_line("Grok 7d", grok.get("seven_d_util"), grok.get("seven_d_reset")))
-        product = _product_line(grok.get("products"))
-        if product:
-            lines.append(product)
+        lines.append(_tip_line("Grok 7d", grok.get("seven_d_util"), grok.get("seven_d_reset")))
+        labels = {"GrokBuild": "Build", "GrokVoice": "Voice"}
+        bits = []
+        for row in grok.get("products") or []:
+            if row.get("util") is None:
+                continue
+            bits.append(f"{labels.get(row['name'], row['name'])} {_pct(row['util'])}")
+        if bits:
+            lines.append("Grok " + " · ".join(bits))
+    kept = []
     for line in lines:
-        yield pystray.MenuItem(line, None, enabled=False)
-    yield pystray.Menu.SEPARATOR
-    yield pystray.MenuItem("Jetzt aktualisieren", force_refresh)
-    yield pystray.MenuItem("Beenden", quit_app)
+        if not line:
+            continue
+        nxt = "\n".join(kept + [line])
+        if len(nxt) > 127:
+            break
+        kept.append(line)
+    return "\n".join(kept) or "Usage"
+
+
+def _apply(icon, wparam, lparam):
+    try:
+        with _lock:
+            image = _state.get("pending_icon")
+            title = _state.get("pending_title")
+        if image is not None:
+            icon.icon = image
+        if title:
+            icon.title = title
+    except Exception:
+        _log_exc()
+    return 0
+
+
+def _publish(icon):
+    image = make_icon([
+        (_state.get("five_h") or {}).get("five_h_util"),
+        (_state.get("seven_d") or {}).get("seven_d_util"),
+        (_state.get("codex") or {}).get("five_h_util"),
+        (_state.get("codex") or {}).get("seven_d_util"),
+        (_state.get("grok") or {}).get("seven_d_util"),
+    ])
+    title = tooltip_text()
+    with _lock:
+        _state["pending_icon"] = image
+        _state["pending_title"] = title
+    hwnd = getattr(icon, "_hwnd", None)
+    if hwnd:
+        traywin.PostMessage(hwnd, WM_APPLY, 0, 0)
+    else:
+        icon.icon = image
+        icon.title = title
 
 
 def poll_loop(icon):
     while True:
         time.sleep(POLL_SECONDS)
-        _refresh_state(icon)
-        icon.title = tooltip_text()
+        try:
+            _refresh_state(icon)
+        except Exception:
+            _log_exc()
 
 
 def force_refresh(icon, item):
-    threading.Thread(target=lambda: _one_shot(icon), daemon=True).start()
+    threading.Thread(target=_one_shot, args=(icon,), daemon=True).start()
 
 
 def _one_shot(icon):
-    _refresh_state(icon)
-    icon.title = tooltip_text()
+    try:
+        _refresh_state(icon)
+    except Exception:
+        _log_exc()
 
 
 def _take(result):
@@ -459,28 +455,35 @@ def _refresh_state(icon):
         _state["codex"] = codex
         _state["grok"] = grok
 
-    icon.icon = make_icon([
-        five_h["five_h_util"] if five_h else None,
-        seven_d["seven_d_util"] if seven_d else None,
-        codex.get("five_h_util") if codex else None,
-        codex.get("seven_d_util") if codex else None,
-        grok.get("seven_d_util") if grok else None,
-    ])
+    _publish(icon)
 
 
 def quit_app(icon, item):
     icon.stop()
 
 
+def _log_exc():
+    import traceback
+    path = os.path.join(os.environ.get("TEMP", "."), "usage-tray-error.log")
+    with open(path, "a", encoding="utf-8") as f:
+        traceback.print_exc(file=f)
+
+
 def main():
     icon = pystray.Icon(
         "claude-codex-usage",
         icon=make_icon([None, None, None, None, None]),
-        title="Usage - startet...",
-        menu=pystray.Menu(menu),
+        title="Claude + Codex Usage - startet...",
+        menu=pystray.Menu(
+            pystray.MenuItem("Jetzt aktualisieren", force_refresh),
+            pystray.MenuItem("Beenden", quit_app),
+        ),
     )
-    _refresh_state(icon)
-    icon.title = tooltip_text()
+    icon._message_handlers[WM_APPLY] = lambda w, l: _apply(icon, w, l)
+    try:
+        _refresh_state(icon)
+    except Exception:
+        _log_exc()
     threading.Thread(target=poll_loop, args=(icon,), daemon=True).start()
     icon.run()
 
