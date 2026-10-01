@@ -1,27 +1,28 @@
 # claude-usage-tray
 
-Windows-Taskleisten-Icon fuer die live Claude-Code Nutzung und lokale Codex-Nutzung.
+Windows-Taskleisten-Icon fuer Claude, Codex und Grok.
 
-- Claude: 5h-Session-Limit und 7-Tage-(Weekly)-Limit aus den Anthropic-RateLimit-Headern.
-- Codex: lokal gespeicherte Token-Nutzung aus `~/.codex/state_5.sqlite`.
+- Claude: 5h-Session und 7-Tage-Limit aus den Anthropic-RateLimit-Headern.
+- Codex: 5h-Session und 7-Tage-Limit aus dem letzten `rate_limits`-Schnappschuss der neuesten Session unter `~/.codex/sessions`.
+- Grok: Wochenquote vom selben Billing-Endpunkt wie `/usage`. Grok hat keine 5h-Session.
 
 ## Funktionsweise
 
-Liest den OAuth-Access-Token aus `~/.claude/.credentials.json` (wird von Claude Code selbst verwaltet/erneuert) und schickt periodisch einen minimalen Request (`max_tokens=1`, Modell Haiku) an `https://api.anthropic.com/v1/messages`. Ausgewertet werden die `anthropic-ratelimit-unified-5h-utilization` / `-7d-utilization` Response-Header sowie die zugehoerigen `-reset` Timestamps — dieselben Werte, die auch die offizielle Anzeige nutzt.
+Claude liest den OAuth-Access-Token aus `~/.claude/.credentials.json` und schickt periodisch einen minimalen Request (`max_tokens=1`, Modell Haiku) an `https://api.anthropic.com/v1/messages`. Ausgewertet werden `anthropic-ratelimit-unified-5h-utilization` / `-7d-utilization` und die zugehoerigen `-reset` Timestamps.
 
-Jeder Poll kostet minimal Quota (1 Output-Token). Standardintervall: alle 5 Minuten.
+Jeder Claude-Poll kostet 1 Output-Token. Standardintervall: alle 5 Minuten.
 
-Codex wird ohne Netzwerk-Request aus der lokalen Codex-Datenbank gelesen. Angezeigt werden die lokal gespeicherten Token fuer heute, 7 Tage und insgesamt. Das ist keine offizielle Account-Quota, sondern eine lokale Nutzungsuebersicht der auf diesem Rechner vorhandenen Codex-Threads.
+Codex liest lokal, ohne Request. Die Werte schreibt Codex selbst in die Session (`primary` = 5 Stunden, `secondary` = 7 Tage, `used_percent`, `resets_at`). Der Balken zeigt den letzten Schnappschuss, nicht einen Live-Stand. Rechtsklick nennt die Uhrzeit dieses Stands.
 
-Wichtig: Codex-Restquote/Reset-Zeit wird derzeit nicht angezeigt, weil diese Werte nicht stabil in den lokalen Codex-Dateien verfuegbar sind. Die Codex-Anzeige ist deshalb ein lokaler Nutzungszaehler, keine Limit-Anzeige.
+Grok liest `~/.grok/auth.json` und fragt `https://cli-chat-proxy.grok.com/v1/billing?format=credits` ab. Angezeigt wird `creditUsagePercent` der laufenden Woche. Der Token wird nicht erneuert; das macht die Grok-CLI selbst.
 
 ## Anzeige
 
-Icon: drei vertikale Balken (Claude 5h, Claude 7d, Codex heute). Claude zeigt echte Limit-Auslastung; Codex normalisiert die heutigen lokalen Tokens gegen `CODEX_DAILY_WARN_TOKENS` (Standard: 10 Mio.).
+Icon: fuenf Balken, von links: Claude 5h, Claude 7d, Codex 5h, Codex 7d, Grok 7d.
 
-Tray-Tooltip: kurze stabile Windows-Anzeige mit Claude-Prozentwerten, Reset-Zeit und Codex-Tokens heute.
+Tooltip: `C 5h ..% 7d ..% | X 5h ..% 7d ..% | G 7d ..%`.
 
-Rechtsklick-Menü: "Jetzt aktualisieren", "Beenden".
+Rechtsklick: dieselben Werte mit Reset-Zeit, dazu "Jetzt aktualisieren" und "Beenden".
 
 ## Setup
 
@@ -30,8 +31,8 @@ pip install -r requirements.txt
 python usage_tray.py
 ```
 
-Voraussetzung: eine aktive Claude-Code-Session/-Anmeldung auf dem Rechner (`~/.claude/.credentials.json` muss existieren).
+Voraussetzung: angemeldetes Claude Code (`~/.claude/.credentials.json`), ein Codex-Session-Log und eine Grok-Anmeldung (`~/.grok/auth.json`).
 
 ## Autostart (Windows)
 
-`start_silent.vbs` startet die App ohne Konsolenfenster via `pythonw.exe`. Für Autostart eine Verknüpfung darauf in den Ordner `shell:startup` legen (Win+R → `shell:startup`).
+`start_silent.vbs` startet die App ohne Konsolenfenster via `pythonw.exe`. Fuer Autostart eine Verknuepfung darauf in den Ordner `shell:startup` legen (Win+R, `shell:startup`).
